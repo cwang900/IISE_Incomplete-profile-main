@@ -1,0 +1,1947 @@
+---
+title: "Code for profile monitoring based on transfer learning of multiple profiles with incomplete samples"
+author: 
+date: "Jan 30, 2021"
+output: html_document
+---
+Clearing memory
+```{r}
+rm(list=ls()) 
+```
+
+Required packages
+```{r}
+
+library(Matrix)
+library(nloptr)
+library(minqa)
+library(optimx)
+library(rootSolve)
+library(nlme)
+library(mvtnorm)
+library(MASS)
+```
+Read me
+
+This is the code for the paper published in IISE Transactions entitled "Profile monitoring based on transfer learning of multiple profiles with incomplete samples", authored by Amirhossein Fallahdizcheh and Chao Wang at the University of Iowa.
+
+This document provides an demonstration of comparisons of the Trigonometircs signal in the paper with profile repetitions (5,4,6). In the paper, we run this code 10 times (10 different training data sets) to achieve the average value of ARL1 for each chart.
+For different settings, following part can be modified.
+n is the number of profiles
+fun2 represents the target profile
+num represents the number of repetition of each profile.
+
+
+Defining profiles, time points, number of repetitions.
+```{r}
+
+n=3;  #number of profiles
+
+fun=function(x,i) { #defining all the profiles except target
+  if     (i==1){
+  
+  return(25+2*cos(x) +rnorm(length(x),0,1)) }
+  else if(i==2){
+    
+    return( -25+2* sin(x) +rnorm(length(x),0,1))    }
+
+}
+fun2=function(x){ #target profile
+  return(10+2 * exp(-0.2*x) * cos(x)+rnorm(length(x),0,1))
+}
+
+num=c(5,4,6) #vector representing number of repetition for each profile
+rep_factor =c() # this vector is used to transform off diagonal element denominators from sqrt(m_i*m_n) to max(m_i,m_n)(refer to equation 13)
+for (i in 1:n-1) {
+  rep_factor[i] = sqrt(num[i]*num[n])/max(num[i] , num[n])
+}
+trains <- seq(0,4*pi,length.out=15) #time points
+trainy1=lapply(1:(n-1),function(i){lapply(1:num[i],function(j){fun(trains,i)})}) #Initial Profiles
+trainy2=matrix(, nrow=n,ncol=15) #Mean matrix
+for(i in 1:(n-1)){
+  trainy2[i,]=apply(do.call("rbind",trainy1[[i]]),2,mean)
+}
+trainy31=lapply(1:num[n],function(j){fun2(trains)}) #target profiles
+trainy3=apply(do.call("rbind",trainy31),2,mean)# mean matrix for target profile
+
+trains=lapply(1:(n-1),function(i){trains})
+trainy=lapply(1:(n-1),function(i){trainy2[i,]})
+tests=trains[[1]];testy=trainy3;m1=length(tests)
+trains1 = unlist(trains[[1]])
+xstar = trains1[c(1,2,3,4,5,6,7,10,11,12,13,15)] #prediction time points
+```
+
+now we define out of control signal and store it in a list :
+a 0.5 point shift for all the points
+
+```{r}
+fun3=function(x){ #generating OC data
+ 
+  return(10+2 * exp(-0.2*x) * cos(x)+rnorm(length(x),0,1.)+0.5)
+}
+y_new = list()
+for (j in 1:10000) {
+  y2 = matrix(NA , 4000 , 12)
+  for (i in 1:4000) {
+    y2[i,] = fun3(xstar)
+  }
+  y_new[[j]] <-y2
+}
+```
+
+
+Conventional $T^2$
+```{r}
+t=proc.time()
+x=tests
+y=trainy3
+n=length(y)
+
+cyii=function(a,b,L)
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+ 
+  L[1]^2*exp(-0.25*d^2/L[2]^2)+ I*L[3]^2
+}
+#Covariance matrix
+C=function(x,H)
+{  cyii(x,x,H[c(1:3)])}
+
+mf=Vectorize(function(tests) {0})#defining initial mean as a vector of 0
+mu=mf(tests)
+
+logL=function(H,fn) #loglikelihood
+{
+  B=C(x,H)
+  deter=det(B)
+  if(deter!=0) {a=0.5*(log(deter)+t(y-mu)%*%solve(B,y-mu)+log(2*pi)*n)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y-mu)%*%solve(B,y-mu)+log(2*pi)*n)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+x0=c(1,1,0.05)#initial points for solver
+
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000)
+
+one=nloptr(x0=x0,eval_f=logL, eval_grad_f=logL_grad, opts= opts, fn=logL)
+
+H0=one$solution #storing parameters estimation in variable
+
+time_1 =proc.time()-t #time to learn
+########################################### Prediction ######################################################
+
+```
+```{r}
+n=3
+t=proc.time()
+cyiiN=function(a,b,L)
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  L[1]^2*exp(-0.25*d^2/L[2]^2)
+}
+
+CC2=C(x,H0)
+
+
+Pk=cyiiN(xstar,x,H0[c(1:2)]) 
+ypred_single=mf(xstar)+Pk%*%solve(C(x,H0),y-mu) #predicted mean
+
+## Prediction Variance
+Sk=cyii(xstar,xstar,H0[c(1:3)])
+
+
+yvar=(Sk  -  Pk%*%solve(C(x,H0),t(Pk)))*num[n] #predicted variance
+#num[n] is used to transfrom from mean to single repetition
+time_2 =proc.time()-t
+```
+
+
+```{r}
+t=proc.time()
+simulat = 50000
+
+ynew = matrix(NA ,simulat, 12) #vector representing IC data
+
+t_2 = rep(NA , simulat)
+ss = solve(yvar)
+for (p in 1:simulat) {
+  ynew[p,] = fun2(xstar)
+  t_2[p] = t(ynew[p,] - ypred_single)%*%ss%*%(ynew[p,]-ypred_single)
+} # creating 10000 T^2 statistics
+
+
+
+q<-quantile(t_2 , 1-(1/370))#95% cut-off from t^2
+q = as.numeric(q)
+
+
+
+run_length = rep(0,10000)
+#finding th average run lenght
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_single)%*%ss%*%(y_new[[k]][i,]-ypred_single))
+    if (w>q) {
+      run_length[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+ARL = mean(run_length)
+time_3 =proc.time()-t
+H0 = 0
+```
+
+
+
+Proposed transfer framework.
+
+
+```{r}
+n=3 #number of profiles
+t= proc.time()
+index=function(n,len,m) #creating index for sparse matrix elements
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+
+cyii=function(a,b,L) #main diagonal elements of covariance matrix
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) #5 #off diagonal elements of covariance matrix
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+y=c(unlist(trainy),c(testy)) #list of trainning data
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+```
+now the covaiance matrix is defined as follows
+```{r}
+
+C=function(strain,H) #covariance matrix
+{
+  zii=list();zip=list();zpp=c()
+  zii = lapply(1:(n-1), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  zip[[1]] = zip[[1]]* rep_factor[1] # if number of n is increased, this part need modification
+  zip[[2]] = zip[[2]]* rep_factor[2]
+  # zip[[]] = zip[[2]]* rep_factor[3] if n=4
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)}))+ (P*K[length(K)]^2)/num[n]
+  # /num[n] is used to trasnform the predicted variance from individual to mean
+  b1=unlist(zii);b2=as.vector(do.call("rbind",zip));
+  return(sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T))
+  
+}
+```
+now first, we define loglikelihood and then  solve for finding the parameters
+```{r}
+logL=function(H,fn) #loglikelihood 
+{
+  B=C(trains,H)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+x0=c(rep(2,4*n-2),5) # starting points for the optimizer
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000) 
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL ), error = function(e) e)
+
+H1=one$solution
+
+H0=H1
+H0
+time_4 = proc.time() - t #time to learn
+```
+
+```{r}
+#prediction part
+t= proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+zip_pred[[1]] = zip_pred[[1]]* rep_factor[1]
+zip_pred[[2]] = zip_pred[[2]]* rep_factor[2]
+#zip[[]] = zip[[2]]* rep_factor[3] if n=4
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)}))+(P2*K1[length(K1)]^2)/num[n]
+# /num[n] is used to trasnform the predicted variance from individual to mean
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_correct=as.matrix(Pk%*%raed) # predicted meand
+yvar1=as.matrix((sk-Pk%*%solve(covM,t(Pk)))*num[n]) #predicted variance
+time_5 = proc.time() - t
+```
+Finding ARL0
+
+```{r}
+t=proc.time()
+simulat = 50000
+ynew = matrix(NA ,simulat, 12)
+t_2 = rep(NA , simulat)
+#in control T^2
+for (p in 1:simulat) {
+  ynew[p,] = fun2(xstar)
+  t_2[p] = t(ynew[p,] - ypred_correct)%*%solve(yvar1)%*%(ynew[p,]-ypred_correct)
+}
+
+q<-quantile(t_2 , 1-(1/370))
+hist(t_2)
+abline(v = q)
+```
+
+```{r , }
+run_length = rep(0,10000)
+ss1=solve(yvar1)
+#Finding ARL1
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_correct)%*%ss1%*%(y_new[[k]][i,]-ypred_correct))
+    if (w>q) {
+      run_length[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+ARL_transfer_correct = mean(run_length)
+
+
+time_6 =proc.time() - t
+H0=0
+```
+
+Equivalent transfer
+same procedure as the proposed transfer except bulding the covariance matrix
+```{r}
+t= proc.time()
+index=function(n,len,m) #
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+
+cyii=function(a,b,L) 
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) 
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+y=c(unlist(trainy),c(testy))
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+```
+```{r}
+
+C=function(strain,H)
+{
+  zii=list();zip=list();zpp=c()
+  zii = lapply(1:(n-1), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)}))+ (P*K[length(K)]^2)
+  #as can be noted, there is no /num[n] since algorith directly estimates all the parameters for mean
+  b1=unlist(zii);b2=as.vector(do.call("rbind",zip));
+  return(sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T))
+}
+```
+now first, we define logliklihood and then  solve for finding the parameters
+```{r}
+logL=function(H,fn)
+{
+  B=C(trains,H)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+x0=c(rep(2,4*n-2),5)
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000 ) 
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL ), error = function(e) e)
+
+H1=one$solution
+
+H0=H1
+H0
+time_7 = proc.time() - t
+```
+now first, we define logliklihood and then  solve for finding the parameters
+
+```{r}
+t = proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)}))+(P2*K1[length(K1)]^2)
+#as can be noted, there is no /num[n] since algorith directly estimates all the parameters for mean
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_wrong=as.matrix(Pk%*%raed)
+yvar2=as.matrix((sk-Pk%*%solve(covM,t(Pk)))*num[n])
+time_8 = proc.time() - t
+```
+
+```{r}
+t=proc.time()
+simulat = 50000
+ss2=solve(yvar2)
+t_2 = rep(NA , simulat)
+
+for (p in 1:simulat) {
+  
+  t_2[p] = t(ynew[p,] - ypred_wrong)%*%ss2%*%(ynew[p,]-ypred_wrong)
+}
+
+q<-quantile(t_2 , 1-(1/370))
+hist(t_2)
+abline(v = q)
+```
+
+```{r  }
+
+run_length1 = rep(0,10000)
+
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_wrong)%*%ss2%*%(y_new[[k]][i,]-ypred_wrong))
+    if (w>q) {
+      run_length1[k] <- i
+    
+      break
+    }
+    
+  }
+}
+
+
+ARL_transfer_wrong = mean(run_length1)
+time_9 =proc.time() - t
+H0=0
+
+```
+
+Minimum transfer
+same procedure as Equivalnet transfer, except for setting up the profiles
+```{r}
+min_rep = min(num) #storing minimum number of repetition
+trains <- seq(0,4*pi,length.out=15)
+for (i in 1:(n-1)) {
+  trainy1[[i]] = trainy1[[i]][1:min_rep] 
+}
+trainy2=matrix(, nrow=n,ncol=15) #Mean matrix
+for(i in 1:(n-1)){
+  trainy2[i,]=apply(do.call("rbind",trainy1[[i]]),2,mean)
+}
+trainy31=trainy31[1:min_rep]
+trainy3=apply(do.call("rbind",trainy31),2,mean)
+trains=lapply(1:(n-1),function(i){trains})
+trainy=lapply(1:(n-1),function(i){trainy2[i,]})
+tests=trains[[1]];testy=trainy3;m1=length(tests)
+x=tests
+y=trainy3
+```
+
+
+```{r}
+
+t=proc.time()
+
+
+index=function(n,len,m)
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+cyii=function(a,b,L) 
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) 
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+
+y=c(unlist(trainy),c(testy))
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+
+C=function(strain,H)
+{
+  zii=list();zip=list();zpp=c()
+  zii = lapply(1:(n-1), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)})) + P*K[length(K)]^2
+  
+  b1=unlist(zii);b2=as.vector(do.call("rbind",zip));
+  return(sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T))
+}
+
+logL=function(H,fn)
+{
+  B=C(trains,H)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+
+x0=c(rep(2,4*n-2),5)
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000)
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL ), error = function(e) e)
+
+
+H1=one$solution
+H0=H1
+time_10 = proc.time()-t # time to lean
+
+```
+```{r}
+t= proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)})) + P2*K1[length(K1)]^2
+
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_tranfer_balanced=as.matrix(Pk%*%raed)
+yvar=(sk-Pk%*%solve(covM,t(Pk)))*min_rep
+
+
+
+
+
+time_11 = proc.time()-t
+```
+
+```{r}
+
+
+t= proc.time()
+simulat = 50000
+
+
+ss1 = as.matrix(solve(yvar))
+t_2 = rep(NA , simulat)
+
+for (q3 in 1:simulat) {
+
+  t_2[q3] = t(ynew[q3,] - ypred_tranfer_balanced)%*%ss1%*%(ynew[q3,]-ypred_tranfer_balanced)
+}
+
+
+
+p3<-quantile(t_2 , 1-(1/370))
+l <- as.numeric(p3)
+
+
+
+
+
+
+run_length3 = rep(0,10000)
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_tranfer_balanced)%*%ss1%*%(y_new[[k]][i,]-ypred_tranfer_balanced))
+    if (w>l) {
+      run_length3[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+
+ARL_transfer_balanced = mean(run_length3)
+
+
+
+
+time_12 = proc.time()-t
+H0 = 0
+```
+
+Full
+same procedure as minimum transfer, except for building the covariance matrix
+
+```{r}
+n=3; 
+
+t = proc.time()
+
+index=function(n,len,m)
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+cyii=function(a,b,L) #
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) #5
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+cyij=function(a,b,L) #5
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+y=c(unlist(trainy),c(testy))
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+
+C=function(strain,H) #bulding the covariance matrix
+{
+  zii=list();zip=list();zpp=c();zij = list();zpp2=c()
+  zii = lapply(1:(n-2), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  
+
+  
+  
+  W=H[c(3,4,12,13,11)]
+  zpp2=Reduce("+",lapply(1:(n-1), function(i){W[2*i-1]^2*exp(-0.25*D^2/W[2*i]^2)})) + P*W[length(W)]^2
+  
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  zip[[2]] = zip[[2]] + cyip(strain[[1]] , strain[[1]] , H[c(12,13,7,8)]) 
+  zij = lapply(1:(n-2), function(i){cyij(strain[[i]],strain[[i+1]],H[c(2*i-1,2*i, 4*n  , 4*n + i)])})#allowing for transfer of information between historical profiles as well,
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)})) + P*K[length(K)]^2
+  zii = unlist(zii)
+  
+  b1=c(zii,zpp2);b2=as.vector(do.call("rbind",zip))
+  q = sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T)
+  q[1:15,16:30] = zij[[1]]#this parts needs to be modifiied based on the time points
+  q[16:30,1:15]= t(zij[[1]])
+  covar = as.matrix(q)
+  return(covar)
+}
+
+
+logL=function(H,fn)
+{
+  B=C(trains,H)#+diag(0.05,172)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+
+x0=c(rep(2,10),5,2,2)
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 9000 )
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL)  ,  error = function(e) e)
+
+
+H1=one$solution
+H0=H1
+time_13 =proc.time() - t
+```
+
+
+```{r}
+t= proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+zip_pred[[2]] =zip_pred[[2]] + cyip(trains[[1]] ,xstar , H0[c(12,13,7,8)])
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)})) + P2*K1[length(K1)]^2
+
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_Full=Pk%*%raed
+yvar=(sk-Pk%*%solve(covM,t(Pk)))*min_rep
+
+time_14 =proc.time() - t
+
+```
+
+```{r}
+t= proc.time()
+simulat = 50000
+#ynew = matrix(NA ,simulat, 12)
+ss2 =solve(yvar)
+
+t_2 = rep(NA , simulat)
+
+for (q4 in 1:simulat) {
+  #ynew[q3,] = fun2(xstar)
+  t_2[q4] = t(ynew[q4,] - ypred_Full)%*%ss2%*%(ynew[q4,]-ypred_Full)
+}
+
+
+
+p4<-quantile(t_2 , 1-(1/370))
+l <- as.numeric(p4)
+
+
+
+
+
+
+run_length4 = rep(0,10000)
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_Full)%*%ss2%*%(y_new[[k]][i,]-ypred_Full))
+    if (w>l) {
+      run_length4[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+
+ARL_Full = mean(run_length4)
+
+
+
+
+
+
+time_15 = proc.time()- t
+
+```
+
+
+```{r}
+#comparing ARL_1
+ARL_3 = ARL #T^2
+ARL_3_correct = ARL_transfer_correct #proposed transfer
+ARL_3_wrong =ARL_transfer_wrong #equivalent transfer
+ARL_3_balanced = ARL_transfer_balanced #minimum trasnfer
+ARL_3_Full = ARL_Full #full
+```
+
+
+```{r}
+Time_3_single= time_1 + time_2 + time_3 #T^2
+Time_3_correct = time_4 + time_5 + time_6 #proposed transfer
+Time_3_wrong=time_7 + time_8 + time_9 #equivalent transfer
+Time_3_balanced=time_10  + time_11 + time_12#minumum transfer
+Time_3_Full=time_13 + time_14 + time_15#full
+```
+
+
+```{r}
+ARL_3
+ARL_3_correct
+ARL_3_wrong
+ARL_3_balanced
+ARL_3_Full
+```
+```{r}
+Time_3_single
+Time_3_correct
+Time_3_wrong
+Time_3_balanced
+Time_3_Full
+```
+
+
+Code for Appendinx G, large numbe of Profiles
+
+
+Defining profiles, time points, number of repetitions.
+```{r}
+
+n=8;  #number of profiles
+
+fun=function(x,i) { #defining all the profiles except target
+  if     (i==1){
+  
+  return(-11*cos(x) +rnorm(length(x),0,1)) }
+  else if(i==2){
+    
+    return( 20*sin(x) +rnorm(length(x),0,1)) 
+  }
+  else if(i==3){
+    
+    return( 5*sin(2*x) +rnorm(length(x),0,1)) 
+  }
+  else if(i==4){
+    
+    return( 0.5*cos(2*x) +rnorm(length(x),0,1)) 
+    }
+else if(i==5){
+    
+    return( 14*sin(3*x) +rnorm(length(x),0,1)) 
+}
+  else if(i==6){
+    
+    return( 0.8*cos(3*x) +rnorm(length(x),0,1)) 
+  }
+  else if(i==7){
+    
+    return( 42*cos(4*x) +rnorm(length(x),0,1)) 
+  }
+ 
+}
+fun2=function(x){ #target profile
+  return(2*sin(x) + -1*cos(x) + sin(2*x) + 3*cos(2*x)+3*sin(3*x) - cos(3*x)+ cos(4*x)+ 11+rnorm(length(x),0,1))
+}
+
+num=c(9,8,8,7,11,8,9,2) #vector representing number of repetition for each profile
+rep_factor =c() # this vector is used to transform off diagonal element denominators from sqrt(m_i*m_n) to max(m_i,m_n)(refer to equation 13)
+for (i in 1:n-1) {
+  rep_factor[i] = sqrt(num[i]*num[n])/max(num[i] , num[n])
+}
+trains <- seq(0,4*pi,length.out=15) #time points
+trainy1=lapply(1:(n-1),function(i){lapply(1:num[i],function(j){fun(trains,i)})}) #Initial Profiles
+trainy2=matrix(, nrow=n,ncol=15) #Mean matrix
+for(i in 1:(n-1)){
+  trainy2[i,]=apply(do.call("rbind",trainy1[[i]]),2,mean)
+}
+trainy31=lapply(1:num[n],function(j){fun2(trains)}) #target profiles
+trainy3=apply(do.call("rbind",trainy31),2,mean)# mean matrix for target profile
+
+trains=lapply(1:(n-1),function(i){trains})
+trainy=lapply(1:(n-1),function(i){trainy2[i,]})
+tests=trains[[1]];testy=trainy3;m1=length(tests)
+trains1 = unlist(trains[[1]])
+xstar = trains1[c(1,2,3,4,5,6,7,10,11,12,13,15)] #prediction time points
+```
+
+now we define out of control signal and store it in a list :
+a 0.5 point shift for all the points
+
+```{r}
+fun3=function(x){ #generating OC data
+ 
+  return(2*sin(x) + -1*cos(x) + sin(2*x) + 3*cos(2*x)+3*sin(3*x) - cos(3*x)+ cos(4*x)+11+rnorm(length(x),0,1)+0.5)
+}
+y_new = list()
+for (j in 1:10000) {
+  y2 = matrix(NA , 4000 , 12)
+  for (i in 1:4000) {
+    y2[i,] = fun3(xstar)
+  }
+  y_new[[j]] <-y2
+}
+```
+
+
+Conventional $T^2$
+```{r}
+t=proc.time()
+x=tests
+y=trainy3
+n=length(y)
+
+cyii=function(a,b,L)
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+ 
+  L[1]^2*exp(-0.25*d^2/L[2]^2)+ I*L[3]^2
+}
+#Covariance matrix
+C=function(x,H)
+{  cyii(x,x,H[c(1:3)])}
+
+mf=Vectorize(function(tests) {0})#defining initial mean as a vector of 0
+mu=mf(tests)
+
+logL=function(H,fn) #loglikelihood
+{
+  B=C(x,H)
+  deter=det(B)
+  if(deter!=0) {a=0.5*(log(deter)+t(y-mu)%*%solve(B,y-mu)+log(2*pi)*n)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y-mu)%*%solve(B,y-mu)+log(2*pi)*n)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+x0=c(1,1,0.05)#initial points for solver
+
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000)
+
+one=nloptr(x0=x0,eval_f=logL, eval_grad_f=logL_grad, opts= opts, fn=logL)
+
+H0=one$solution #storing parameters estimation in variable
+
+time_1 =proc.time()-t #time to learn
+########################################### Prediction ######################################################
+
+```
+```{r}
+n=8
+t=proc.time()
+cyiiN=function(a,b,L)
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  L[1]^2*exp(-0.25*d^2/L[2]^2)
+}
+
+CC2=C(x,H0)
+
+
+Pk=cyiiN(xstar,x,H0[c(1:2)]) 
+ypred_single=mf(xstar)+Pk%*%solve(C(x,H0),y-mu) #predicted mean
+
+## Prediction Variance
+Sk=cyii(xstar,xstar,H0[c(1:3)])
+
+
+yvar=(Sk  -  Pk%*%solve(C(x,H0),t(Pk)))*num[n] #predicted variance
+#num[n] is used to transfrom from mean to single repetition
+time_2 =proc.time()-t
+```
+
+
+```{r}
+t=proc.time()
+simulat = 50000
+
+ynew = matrix(NA ,simulat, 12) #vector representing IC data
+
+t_2 = rep(NA , simulat)
+ss = solve(yvar)
+for (p in 1:simulat) {
+  ynew[p,] = fun2(xstar)
+  t_2[p] = t(ynew[p,] - ypred_single)%*%ss%*%(ynew[p,]-ypred_single)
+} # creating 10000 T^2 statistics
+
+
+
+q<-quantile(t_2 , 1-(1/370))#95% cut-off from t^2
+q = as.numeric(q)
+
+
+
+run_length = rep(0,10000)
+#finding th average run lenght
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_single)%*%ss%*%(y_new[[k]][i,]-ypred_single))
+    if (w>q) {
+      run_length[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+ARL = mean(run_length)
+time_3 =proc.time()-t
+H0 = 0
+```
+
+
+
+Proposed transfer framework.
+
+
+```{r}
+n=8 #number of profiles
+t= proc.time()
+index=function(n,len,m) #creating index for sparse matrix elements
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+
+cyii=function(a,b,L) #main diagonal elements of covariance matrix
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) #5 #off diagonal elements of covariance matrix
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+y=c(unlist(trainy),c(testy)) #list of trainning data
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+```
+now the covaiance matrix is defined as follows
+```{r}
+
+C=function(strain,H) #covariance matrix
+{
+  zii=list();zip=list();zpp=c()
+  zii = lapply(1:(n-1), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  zip[[1]] = zip[[1]]* rep_factor[1] # if number of n is increased, this part need modification
+  zip[[2]] = zip[[2]]* rep_factor[2]
+  zip[[3]] = zip[[3]]* rep_factor[3]
+  zip[[4]] = zip[[4]]* rep_factor[4]
+  zip[[5]] = zip[[5]]* rep_factor[5]
+  zip[[6]] = zip[[6]]* rep_factor[6]
+  zip[[7]] = zip[[7]]* rep_factor[7]
+  # zip[[]] = zip[[2]]* rep_factor[3] if n=4
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)}))+ (P*K[length(K)]^2)/num[n]
+  # /num[n] is used to trasnform the predicted variance from individual to mean
+  b1=unlist(zii);b2=as.vector(do.call("rbind",zip));
+  return(sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T))
+  
+}
+```
+now first, we define loglikelihood and then  solve for finding the parameters
+```{r}
+logL=function(H,fn) #loglikelihood 
+{
+  B=C(trains,H)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+x0=c(rep(2,4*n-2),5) # starting points for the optimizer
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000) 
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL ), error = function(e) e)
+
+H1=one$solution
+
+H0=H1
+H0
+time_4 = proc.time() - t #time to learn
+```
+
+```{r}
+#prediction part
+t= proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+zip_pred[[1]] = zip_pred[[1]]* rep_factor[1]
+zip_pred[[2]] = zip_pred[[2]]* rep_factor[2]
+zip_pred[[3]] = zip_pred[[3]]* rep_factor[3]
+zip_pred[[4]] = zip_pred[[4]]* rep_factor[4]
+zip_pred[[5]] = zip_pred[[5]]* rep_factor[5]
+zip_pred[[6]] = zip_pred[[6]]* rep_factor[6]
+zip_pred[[7]] = zip_pred[[7]]* rep_factor[7]
+
+#zip[[]] = zip[[2]]* rep_factor[3] if n=4
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)}))+(P2*K1[length(K1)]^2)/num[n]
+# /num[n] is used to trasnform the predicted variance from individual to mean
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_correct=as.matrix(Pk%*%raed) # predicted meand
+yvar1=as.matrix((sk-Pk%*%solve(covM,t(Pk)))*num[n]) #predicted variance
+time_5 = proc.time() - t
+```
+Finding ARL0
+
+```{r}
+t=proc.time()
+simulat = 50000
+ynew = matrix(NA ,simulat, 12)
+t_2 = rep(NA , simulat)
+#in control T^2
+for (p in 1:simulat) {
+  ynew[p,] = fun2(xstar)
+  t_2[p] = t(ynew[p,] - ypred_correct)%*%solve(yvar1)%*%(ynew[p,]-ypred_correct)
+}
+
+q<-quantile(t_2 , 1-(1/370))
+hist(t_2)
+abline(v = q)
+```
+
+```{r , }
+run_length = rep(0,10000)
+ss1=solve(yvar1)
+#Finding ARL1
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_correct)%*%ss1%*%(y_new[[k]][i,]-ypred_correct))
+    if (w>q) {
+      run_length[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+ARL_transfer_correct = mean(run_length)
+
+
+time_6 =proc.time() - t
+H0=0
+```
+
+Equivalent transfer
+same procedure as the proposed transfer except bulding the covariance matrix
+```{r}
+t= proc.time()
+index=function(n,len,m) #
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+
+cyii=function(a,b,L) 
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) 
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+y=c(unlist(trainy),c(testy))
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+```
+```{r}
+
+C=function(strain,H)
+{
+  zii=list();zip=list();zpp=c()
+  zii = lapply(1:(n-1), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)}))+ (P*K[length(K)]^2)
+  #as can be noted, there is no /num[n] since algorith directly estimates all the parameters for mean
+  b1=unlist(zii);b2=as.vector(do.call("rbind",zip));
+  return(sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T))
+}
+```
+now first, we define logliklihood and then  solve for finding the parameters
+```{r}
+logL=function(H,fn)
+{
+  B=C(trains,H)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+x0=c(rep(2,4*n-2),5)
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000 ) 
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL ), error = function(e) e)
+
+H1=one$solution
+
+H0=H1
+H0
+time_7 = proc.time() - t
+```
+now first, we define logliklihood and then  solve for finding the parameters
+
+```{r}
+t = proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)}))+(P2*K1[length(K1)]^2)
+#as can be noted, there is no /num[n] since algorith directly estimates all the parameters for mean
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_wrong=as.matrix(Pk%*%raed)
+yvar2=as.matrix((sk-Pk%*%solve(covM,t(Pk)))*num[n])
+time_8 = proc.time() - t
+```
+
+```{r}
+t=proc.time()
+simulat = 50000
+ss2=solve(yvar2)
+t_2 = rep(NA , simulat)
+
+for (p in 1:simulat) {
+  
+  t_2[p] = t(ynew[p,] - ypred_wrong)%*%ss2%*%(ynew[p,]-ypred_wrong)
+}
+
+q<-quantile(t_2 , 1-(1/370))
+hist(t_2)
+abline(v = q)
+```
+
+```{r  }
+
+run_length1 = rep(0,10000)
+
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_wrong)%*%ss2%*%(y_new[[k]][i,]-ypred_wrong))
+    if (w>q) {
+      run_length1[k] <- i
+    
+      break
+    }
+    
+  }
+}
+
+
+ARL_transfer_wrong = mean(run_length1)
+time_9 =proc.time() - t
+H0=0
+
+```
+
+Minimum transfer
+same procedure as Equivalnet transfer, except for setting up the profiles
+```{r}
+min_rep = min(num) #storing minimum number of repetition
+trains <- seq(0,4*pi,length.out=15)
+for (i in 1:(n-1)) {
+  trainy1[[i]] = trainy1[[i]][1:min_rep] 
+}
+trainy2=matrix(, nrow=n,ncol=15) #Mean matrix
+for(i in 1:(n-1)){
+  trainy2[i,]=apply(do.call("rbind",trainy1[[i]]),2,mean)
+}
+trainy31=trainy31[1:min_rep]
+trainy3=apply(do.call("rbind",trainy31),2,mean)
+trains=lapply(1:(n-1),function(i){trains})
+trainy=lapply(1:(n-1),function(i){trainy2[i,]})
+tests=trains[[1]];testy=trainy3;m1=length(tests)
+x=tests
+y=trainy3
+```
+
+
+```{r}
+
+t=proc.time()
+
+
+index=function(n,len,m)
+{
+  p1=c();p2=c();p3=c();p4=c();p5=c();p6=c()
+  pp=sum(len)
+  for(j in 1:(n-1))
+  {
+    i1=1 + sum(len[0:(j-1)])
+    for(i in i1:(i1+len[j]-1))
+    {
+      p1=c(p1,i1:i)
+      p2=c(p2,rep(i,length(i1:i)))
+    }
+  }
+  p3=rep(1:pp,m)
+  for(i in 1:m)
+  {
+    p4=c(p4,rep(pp+i,pp))
+  }
+  i2=pp+1
+  for(i in i2:(i2+m-1))
+  {
+    p5=c(p5,i2:i)
+    p6=c(p6,rep(i,length(i2:i)))
+  }
+  
+  return(list(pfi=c(p1,p3,p5),pfj=c(p2,p4,p6)))
+}
+pf=index(n,lengths(trains),m1)
+pfi=pf$pfi;pfj=pf$pfj
+cyii=function(a,b,L) 
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+  d=d[upper.tri(d,diag=T)];I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) 
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+
+y=c(unlist(trainy),c(testy))
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+
+C=function(strain,H)
+{
+  zii=list();zip=list();zpp=c()
+  zii = lapply(1:(n-1), function(i){cyii(strain[[i]],strain[[i]],H[c(2*i-1,2*i,4*n-1)])})
+  zip = lapply(1:(n-1), function(i){cyip(strain[[i]],tests,H[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+  
+  K=H[(2*n-1):(4*n-1)]
+  zpp=Reduce("+",lapply(1:n, function(i){K[2*i-1]^2*exp(-0.25*D^2/K[2*i]^2)})) + P*K[length(K)]^2
+  
+  b1=unlist(zii);b2=as.vector(do.call("rbind",zip));
+  return(sparseMatrix(i=pfi,j=pfj,x=c(b1,b2,zpp),symmetric=T))
+}
+
+logL=function(H,fn)
+{
+  B=C(trains,H)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+
+x0=c(rep(2,4*n-2),5)
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 2000)
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL ), error = function(e) e)
+
+
+H1=one$solution
+H0=H1
+time_10 = proc.time()-t # time to lean
+
+```
+```{r}
+t= proc.time()
+zip_pred=list()
+zip_pred =lapply(1:(n-1), function(i){cyip(trains[[i]],xstar,H0[c(2*i-1,2*i,2*n+2*i-1,2*n+2*i)])})
+
+D1=outer(xstar,tests,`-`)
+K1=H0[(2*n-1):(4*n-1)]
+zip_pred[[n]]=t(Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D1^2/K1[(2*i)]^2)})))
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk=Reduce("+",lapply(1:n, function(i){K1[(2*i-1)]^2*exp(-0.25*D2^2/K1[(2*i)]^2)})) + P2*K1[length(K1)]^2
+
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_tranfer_balanced=as.matrix(Pk%*%raed)
+yvar=(sk-Pk%*%solve(covM,t(Pk)))*min_rep
+
+
+
+
+
+time_11 = proc.time()-t
+```
+
+```{r}
+
+
+t= proc.time()
+simulat = 50000
+
+
+ss1 = as.matrix(solve(yvar))
+t_2 = rep(NA , simulat)
+
+for (q3 in 1:simulat) {
+
+  t_2[q3] = t(ynew[q3,] - ypred_tranfer_balanced)%*%ss1%*%(ynew[q3,]-ypred_tranfer_balanced)
+}
+
+
+
+p3<-quantile(t_2 , 1-(1/370))
+l <- as.numeric(p3)
+
+
+
+
+
+
+run_length3 = rep(0,10000)
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_tranfer_balanced)%*%ss1%*%(y_new[[k]][i,]-ypred_tranfer_balanced))
+    if (w>l) {
+      run_length3[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+
+ARL_transfer_balanced = mean(run_length3)
+
+
+
+
+time_12 = proc.time()-t
+H0 = 0
+```
+
+Full
+same procedure as minimum transfer, except for building the covariance matrix
+
+
+
+```{r}
+
+n=8; 
+
+t = proc.time()
+
+
+cyii=function(a,b,L) #
+{
+  d=outer(a,b,`-`);I=outer(a,b,`==`)
+ I=I[upper.tri(I,diag=T)]
+  L[1]^2*exp(-0.25*d^2/L[2]^2) +  I*L[3]^2
+}
+cyip=function(a,b,L) #5
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+cyij=function(a,b,L) #5
+{
+  d=outer(a,b,`-`)
+  L[1]*L[3]*sqrt(2*abs(L[2]*L[4])/(L[2]^2+L[4]^2))*exp(-0.5*d^2/(L[2]^2+L[4]^2))
+}
+
+y=c(unlist(trainy),c(testy))
+D=outer(tests,tests,`-`);P=outer(tests,tests,`==`)
+D=D[upper.tri(D,diag=T)];P=P[upper.tri(P,diag=T)]
+leny=length(y)
+
+C=function(strain,H) #bulding the covariance matrix, manually defining the covariance structure as other methods were not as resilient. note that the numbers written as the comment next to each line refer to each block in covariance matrix.
+{
+q = matrix(NA, 120,120)
+q[1:15,1:15] = cyij(strain[[1]],strain[[1]],H[c(1,2,1,2)]) + diag(15)*(H[73]^2)#11
+q[1:15,16:30] = cyij(strain[[1]],strain[[1]],H[c(1,2,3,4)])#12
+q[1:15,31:45] = cyij(strain[[1]],strain[[1]],H[c(1,2,5,6)])#13
+q[1:15,46:60] = cyij(strain[[1]],strain[[1]],H[c(1,2,7,8)])#14
+q[1:15,61:75] = cyij(strain[[1]],strain[[1]],H[c(1,2,9,10)])#15
+q[1:15,76:90] = cyij(strain[[1]],strain[[1]],H[c(1,2,11,12)])#16
+q[1:15,91:105] = cyij(strain[[1]],strain[[1]],H[c(1,2,13,14)])#17
+q[1:15,106:120] = cyij(strain[[1]],strain[[1]],H[c(1,2,15,16)])#18
+#####################################################################2
+
+q[16:30,1:15] = t(q[1:15,16:30])#21
+q[16:30,16:30] = cyij(strain[[1]],strain[[1]],H[c(3,4,3,4)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(17,18,17,18)]) #22
+q[16:30,31:45] =  cyij(strain[[1]],strain[[1]],H[c(17,18,19,20)]) +  cyij(strain[[1]],strain[[1]],H[c(5,6,3,4)])#23
+q[16:30,46:60] =  cyij(strain[[1]],strain[[1]],H[c(17,18,21,22)]) +  cyij(strain[[1]],strain[[1]],H[c(7,8,3,4)])#24
+q[16:30,61:75] =  cyij(strain[[1]],strain[[1]],H[c(17,18,23,24)]) +  cyij(strain[[1]],strain[[1]],H[c(9,10,3,4)])#25
+q[16:30,76:90] =  cyij(strain[[1]],strain[[1]],H[c(17,18,25,26)]) +  cyij(strain[[1]],strain[[1]],H[c(11,12,3,4)])#26
+q[16:30,91:105] =  cyij(strain[[1]],strain[[1]],H[c(17,18,27,28)]) +  cyij(strain[[1]],strain[[1]],H[c(13,14,3,4)])#27
+q[16:30,106:120] =  cyij(strain[[1]],strain[[1]],H[c(17,18,29,30)]) +  cyij(strain[[1]],strain[[1]],H[c(15,16,3,4)])#28
+
+######################################################################3
+
+
+q[31:45,1:15] = t(q[1:15,31:45])#31
+q[31:45,16:30] = t(q[16:30,31:45])#32
+q[31:45,31:45] = cyij(strain[[1]],strain[[1]],H[c(5,6,5,6)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(19,20,19,20)])+ cyij(strain[[1]],strain[[1]],H[c(31,32,31,32)]) #33
+q[31:45,46:60] = cyij(strain[[1]],strain[[1]],H[c(31,32,33,34)]) +  cyij(strain[[1]],strain[[1]],H[c(7,8,5,6)])+ cyij(strain[[1]],strain[[1]],H[c(19,20,21,22)])#34
+q[31:45,61:75] = cyij(strain[[1]],strain[[1]],H[c(31,32,35,36)]) +  cyij(strain[[1]],strain[[1]],H[c(9,10,5,6)])+ cyij(strain[[1]],strain[[1]],H[c(19,20,23,24)])#35
+q[31:45,76:90] = cyij(strain[[1]],strain[[1]],H[c(31,32,37,38)]) +  cyij(strain[[1]],strain[[1]],H[c(11,12,5,6)])+ cyij(strain[[1]],strain[[1]],H[c(19,20,25,26)])#36
+q[31:45,91:105] = cyij(strain[[1]],strain[[1]],H[c(31,32,39,40)]) +  cyij(strain[[1]],strain[[1]],H[c(13,14,5,6)])+ cyij(strain[[1]],strain[[1]],H[c(19,20,27,28)])#37
+q[31:45,106:120] = cyij(strain[[1]],strain[[1]],H[c(31,32,41,42)]) +  cyij(strain[[1]],strain[[1]],H[c(15,16,5,6)])+ cyij(strain[[1]],strain[[1]],H[c(19,20,29,30)])#37
+
+
+
+####################################4
+
+q[46:60,1:15] = t(q[1:15,46:60])#41
+q[46:60,16:30]=t(q[16:30,46:60])#42
+q[46:60,31:45]= t(q[31:45,46:60])#43
+q[46:60,46:60] = cyij(strain[[1]],strain[[1]],H[c(7,8,7,8)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(21,22,21,22)])+ cyij(strain[[1]],strain[[1]],H[c(33,34,33,34)]) + cyij(strain[[1]],strain[[1]],H[c(43,44,43,44)]) #44
+q[46:60,61:75] = cyij(strain[[1]],strain[[1]],H[c(43,44,45,46)]) +  cyij(strain[[1]],strain[[1]],H[c(9,10,7,8)])+ cyij(strain[[1]],strain[[1]],H[c(33,34,35,36)])+cyij(strain[[1]],strain[[1]],H[c(21,22,23,24)])#45
+q[46:60,76:90] = cyij(strain[[1]],strain[[1]],H[c(43,44,47,48)]) +  cyij(strain[[1]],strain[[1]],H[c(11,12,7,8)])+ cyij(strain[[1]],strain[[1]],H[c(33,34,37,38)])+ cyij(strain[[1]],strain[[1]],H[c(21,22,25,26)])#46
+q[46:60,91:105] = cyij(strain[[1]],strain[[1]],H[c(43,44,49,50)]) +  cyij(strain[[1]],strain[[1]],H[c(13,14,7,8)])+ cyij(strain[[1]],strain[[1]],H[c(33,34,39,40)])+ cyij(strain[[1]],strain[[1]],H[c(21,22,27,28)])#47
+q[46:60,106:120] = cyij(strain[[1]],strain[[1]],H[c(43,44,51,52)]) +  cyij(strain[[1]],strain[[1]],H[c(15,16,7,8)])+ cyij(strain[[1]],strain[[1]],H[c(33,34,41,42)])+ cyij(strain[[1]],strain[[1]],H[c(21,22,29,30)])#48
+
+################################5
+q[61:75,1:15] = t(q[1:15,61:75])#51
+q[61:75,16:30] = t(q[16:30,61:75])#52
+q[61:75,31:45] = t(q[31:45,61:75])#53
+q[61:75,46:60] = t(q[46:60,61:75])#54
+q[61:75,61:75] = cyij(strain[[1]],strain[[1]],H[c(9,10,9,10)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(23,24,23,24)])+ cyij(strain[[1]],strain[[1]],H[c(35,36,35,36)]) + cyij(strain[[1]],strain[[1]],H[c(45,46,45,46)])+ cyij(strain[[1]],strain[[1]],H[c(53,54,53,54)])#55
+q[61:75,76:90]= cyij(strain[[1]],strain[[1]],H[c(53,54,55,56)]) +  cyij(strain[[1]],strain[[1]],H[c(9,10,11,12)])+ cyij(strain[[1]],strain[[1]],H[c(37,38,35,36)])+cyij(strain[[1]],strain[[1]],H[c(23,24,25,26)])+cyij(strain[[1]],strain[[1]],H[c(45,46,47,48)])#56
+q[61:75,91:105]= cyij(strain[[1]],strain[[1]],H[c(53,54,57,58)]) +  cyij(strain[[1]],strain[[1]],H[c(9,10,13,14)])+ cyij(strain[[1]],strain[[1]],H[c(39,40,35,36)])+cyij(strain[[1]],strain[[1]],H[c(23,24,27,28)])+cyij(strain[[1]],strain[[1]],H[c(45,46,49,50)])#57
+q[61:75,106:120]= cyij(strain[[1]],strain[[1]],H[c(53,54,59,60)]) +  cyij(strain[[1]],strain[[1]],H[c(9,10,15,16)])+ cyij(strain[[1]],strain[[1]],H[c(41,42,35,36)])+cyij(strain[[1]],strain[[1]],H[c(23,24,29,30)])+cyij(strain[[1]],strain[[1]],H[c(45,46,51,52)])#58
+
+
+
+
+######################################6
+
+q[76:90,1:15] = t(q[1:15,76:90])#61
+q[76:90,16:30] = t(q[16:30,76:90])#62
+q[76:90,31:45] = t(q[31:45,76:90])#63
+q[76:90,46:60] = t(q[46:60,76:90])#64
+q[76:90,61:75] = t(q[61:75,76:90])#65
+q[76:90,76:90] =  cyij(strain[[1]],strain[[1]],H[c(11,12,11,12)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(25,26,25,26)])+ cyij(strain[[1]],strain[[1]],H[c(37,38,37,38)]) + cyij(strain[[1]],strain[[1]],H[c(47,48,47,48)])+ cyij(strain[[1]],strain[[1]],H[c(55,56,55,56)])+cyij(strain[[1]],strain[[1]],H[c(61,62,61,62)])#66
+q[76:90,91:105] = cyij(strain[[1]],strain[[1]],H[c(61,62,63,64)]) +  cyij(strain[[1]],strain[[1]],H[c(11,12,13,14)])+ cyij(strain[[1]],strain[[1]],H[c(25,26,27,28)])+cyij(strain[[1]],strain[[1]],H[c(37,38,39,40)])+cyij(strain[[1]],strain[[1]],H[c(47,48,49,50)])+cyij(strain[[1]],strain[[1]],H[c(55,56,57,58)])#67
+q[76:90,106:120] = cyij(strain[[1]],strain[[1]],H[c(61,62,65,66)]) +  cyij(strain[[1]],strain[[1]],H[c(11,12,15,16)])+ cyij(strain[[1]],strain[[1]],H[c(25,26,29,30)])+cyij(strain[[1]],strain[[1]],H[c(37,38,41,42)])+cyij(strain[[1]],strain[[1]],H[c(47,48,51,52)])+cyij(strain[[1]],strain[[1]],H[c(55,56,59,60)])#68
+
+##############################################7
+
+q[91:105,1:15] = t(q[1:15,91:105])#71
+q[91:105,16:30] = t(q[16:30,91:105])#72
+q[91:105,31:45] = t(q[31:45,91:105])#73
+q[91:105,46:60] = t(q[46:60,91:105])#74
+q[91:105,61:75] = t(q[61:75,91:105])#75
+q[91:105,76:90] = t(q[76:90,91:105])#76
+q[91:105,91:105] =  cyij(strain[[1]],strain[[1]],H[c(13,14,13,14)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(27,28,27,28)])+ cyij(strain[[1]],strain[[1]],H[c(39,40,39,40)]) + cyij(strain[[1]],strain[[1]],H[c(49,50,49,50)])+ cyij(strain[[1]],strain[[1]],H[c(57,58,57,58)])+cyij(strain[[1]],strain[[1]],H[c(63,64,63,64)])+cyij(strain[[1]],strain[[1]],H[c(67,68,67,68)])#77
+q[91:105,106:120] = cyij(strain[[1]],strain[[1]],H[c(67,68,69,70)]) +  cyij(strain[[1]],strain[[1]],H[c(13,14,15,16)])+ cyij(strain[[1]],strain[[1]],H[c(27,28,29,30)])+cyij(strain[[1]],strain[[1]],H[c(39,40,41,42)])+cyij(strain[[1]],strain[[1]],H[c(49,50,51,52)])+cyij(strain[[1]],strain[[1]],H[c(57,58,59,60)])+cyij(strain[[1]],strain[[1]],H[c(63,64,65,66)])#78
+
+###########################################8
+
+q[106:120,1:15] = t(q[1:15,106:120])#81
+q[106:120,16:30] = t(q[16:30,106:120])#82
+q[106:120,31:45] = t(q[31:45,106:120])#83
+q[106:120,46:60] = t(q[46:60,106:120])#84
+q[106:120,61:75] = t(q[61:75,106:120])#85
+q[106:120,76:90] = t(q[76:90,106:120])#86
+q[106:120,91:105] = t(q[91:105,106:120])#87
+q[106:120,106:120] =  cyij(strain[[1]],strain[[1]],H[c(15,16,15,16)]) + diag(15)*(H[73]^2) +cyij(strain[[1]],strain[[1]],H[c(29,30,29,30)])+ cyij(strain[[1]],strain[[1]],H[c(41,42,41,42)]) + cyij(strain[[1]],strain[[1]],H[c(51,52,51,52)])+ cyij(strain[[1]],strain[[1]],H[c(59,60,59,60)])+cyij(strain[[1]],strain[[1]],H[c(65,66,65,66)])+cyij(strain[[1]],strain[[1]],H[c(69,70,69,70)])+cyij(strain[[1]],strain[[1]],H[c(71,72,71,72)])#77
+
+
+
+
+return(q)
+
+
+
+
+}
+
+
+logL=function(H,fn)
+{
+  B=C(trains,H)#+diag(0.05,172)
+  deter=det(B)
+  if(deter>0) {a=0.5*(log(deter)+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  } else {
+    ch=chol(B)
+    logdeter=2*(sum(log(diag(ch))))
+    a=0.5*(logdeter+t(y)%*%solve(B,y)+log(2*pi)*leny)
+  }
+  return(as.numeric(a))
+}
+logL_grad=function(H,fn)
+{
+  return(nl.grad(H,fn))
+}
+
+
+x0=c(rep(2,72),5)
+
+opts <- list( "algorithm" = "NLOPT_LD_MMA","maxeval" = 9000 )
+
+one=tryCatch(nloptr(x0=x0,eval_f= logL,eval_grad_f = logL_grad,opts= opts,fn= logL)  ,  error = function(e) e)
+
+
+H1=one$solution
+H0=H1
+time_13 =proc.time() - t
+```
+
+
+```{r}
+t= proc.time()
+zip_pred=list()
+
+#re-structuring the prediction of the covariance matrix
+zip_pred[[1]] = cyij(trains[[1]],xstar,H0[c(1,2,15,16)])
+zip_pred[[2]] = cyij(trains[[1]],xstar,H0[c(17,18,29,30)]) +  cyij(trains[[1]],xstar,H0[c(15,16,3,4)])
+zip_pred[[3]] = cyij(trains[[1]],xstar,H0[c(31,32,41,42)]) +  cyij(trains[[1]],xstar,H0[c(15,16,5,6)])+ cyij(trains[[1]],xstar,H0[c(19,20,29,30)])
+zip_pred[[4]] = cyij(trains[[1]],xstar,H0[c(43,44,51,52)]) +  cyij(trains[[1]],xstar,H0[c(15,16,7,8)])+ cyij(trains[[1]],xstar,H0[c(33,34,41,42)])+ cyij(trains[[1]],xstar,H0[c(21,22,29,30)])
+zip_pred[[5]] = cyij(trains[[1]],xstar,H0[c(53,54,59,60)]) +  cyij(trains[[1]],xstar,H0[c(9,10,15,16)])+ cyij(trains[[1]],xstar,H0[c(41,42,35,36)])+cyij(trains[[1]],xstar,H0[c(23,24,29,30)])+cyij(trains[[1]],xstar,H0[c(45,46,51,52)])#58
+zip_pred[[6]] = cyij(trains[[1]],xstar,H0[c(61,62,65,66)]) +  cyij(trains[[1]],xstar,H0[c(11,12,15,16)])+ cyij(trains[[1]],xstar,H0[c(25,26,29,30)])+cyij(trains[[1]],xstar,H0[c(37,38,41,42)])+cyij(trains[[1]],xstar,H0[c(47,48,51,52)])+cyij(trains[[1]],xstar,H0[c(55,56,59,60)])
+zip_pred[[7]] =  cyij(trains[[1]],xstar,H0[c(67,68,69,70)]) +  cyij(trains[[1]],xstar,H0[c(13,14,15,16)])+ cyij(trains[[1]],xstar,H0[c(27,28,29,30)])+cyij(trains[[1]],xstar,H0[c(39,40,41,42)])+cyij(trains[[1]],xstar,H0[c(49,50,51,52)])+cyij(trains[[1]],xstar,H0[c(57,58,59,60)])+cyij(trains[[1]],xstar,H0[c(63,64,65,66)])#78
+
+zip_pred[[8]] = cyij(trains[[1]],xstar,H0[c(15,16,15,16)])  +cyij(trains[[1]],xstar,H0[c(29,30,29,30)])+ cyij(trains[[1]],xstar,H0[c(41,42,41,42)]) + cyij(trains[[1]],xstar,H0[c(51,52,51,52)])+ cyij(trains[[1]],xstar,H0[c(59,60,59,60)])+cyij(trains[[1]],xstar,H0[c(65,66,65,66)])+cyij(trains[[1]],xstar,H0[c(69,70,69,70)])+cyij(trains[[1]],xstar,H0[c(71,72,71,72)])
+
+Pk=t(do.call("rbind",zip_pred))
+
+D2=outer(xstar,xstar,`-`);P2=outer(xstar,xstar,`==`)
+sk = cyij(xstar,xstar,H0[c(15,16,15,16)])  +cyij(xstar,xstar,H0[c(29,30,29,30)])+ cyij(xstar,xstar,H0[c(41,42,41,42)]) + cyij(xstar,xstar,H0[c(51,52,51,52)])+ cyij(xstar,xstar,H0[c(59,60,59,60)])+cyij(xstar,xstar,H0[c(65,66,65,66)])+cyij(xstar,xstar,H0[c(69,70,69,70)])+cyij(xstar,xstar,H0[c(71,72,71,72)]) + + diag(12)*(H0[73]^2)
+
+covM=C(trains,H0)
+raed=solve(covM,y)
+ypred_Full=Pk%*%raed
+yvar=(sk-Pk%*%solve(covM,t(Pk)))*min_rep
+
+time_14 =proc.time() - t
+
+```
+
+```{r}
+t= proc.time()
+simulat = 50000
+#ynew = matrix(NA ,simulat, 12)
+ss2 =solve(yvar)
+
+t_2 = rep(NA , simulat)
+
+for (q4 in 1:simulat) {
+  #ynew[q3,] = fun2(xstar)
+  t_2[q4] = t(ynew[q4,] - ypred_Full)%*%ss2%*%(ynew[q4,]-ypred_Full)
+}
+
+
+
+p4<-quantile(t_2 , 1-(1/370))
+l <- as.numeric(p4)
+
+
+
+
+
+
+run_length4 = rep(0,10000)
+for (k in 1:10000) {
+  for (i in 1:4000) {
+    w<- as.numeric( t(y_new[[k]][i,] - ypred_Full)%*%ss2%*%(y_new[[k]][i,]-ypred_Full))
+    if (w>l) {
+      run_length4[k] <- i
+      
+      break
+    }
+    
+  }
+}
+
+
+
+ARL_Full = mean(run_length4)
+
+
+
+
+
+
+time_15 = proc.time()- t
+
+```
+
+
+```{r}
+#comparing ARL_1
+ARL #T^2
+ARL_transfer_correct #proposed transfer
+ARL_transfer_wrong #equivalent transfer
+ARL_transfer_balanced #minimum trasnfer
+ARL_Full #full
+```
+
+```{r}
+#Comparing Time to Learn
+time_1 + time_2 + time_3 #T^2
+time_4 + time_5 + time_6 #proposed transfer
+time_7 + time_8 + time_9 #equivalent transfer
+time_10  + time_11 + time_12#minumum transfer
+time_13 + time_14 + time_15#full
+```
+
+
+
+
+
+
+
